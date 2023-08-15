@@ -1,0 +1,426 @@
+apt install slapd ldap-utils
+slapcat
+dpkg-reconfigure slapd
+slapcat
+ldapsearch -x -LLL -b "" -s base namingContexts
+
+ldapsearch -H ldapi:/// -Y EXTERNAL -b "cn=config" -LLL -Q | grep olcRootDN:
+
+ldapsearch -H ldapi:/// -Y EXTERNAL -b "cn=config" -LLL -Q | grep olcLogLevel:
+
+ldapmodify -Y EXTERNAL -H ldapi:/// -Q
+...
+dn: cn=config
+changeType: modify
+replace: olcLogLevel
+olcLogLevel: stats
+...
+Copy Paste press ENER and then press CTRL+D
+
+
+
+ldapsearch -Y EXTERNAL -H ldapi:/// -b cn=config "(objectClass=olcGlobal)" olcLogLevel -LLL -Q
+
+echo "local4.* /var/log/slapd.log" >> /etc/rsyslog.d/51-slapd.conf
+
+systemctl restart rsyslog slapd
+
+nano /etc/logrotate.d/slapd
+...
+/var/log/slapd.log
+{ 
+        rotate 7
+        daily
+        missingok
+        notifempty
+        delaycompress
+        compress
+        postrotate
+                /usr/lib/rsyslog/rsyslog-rotate
+        endscript
+}
+...
+systemctl restart logrotate
+
+ldapsearch -x -LLL -b "dc=logon,dc=bykea,dc=local"
+
+mkdir -p /etc/ssl/openldap/{private,certs,newcerts}
+
+nano /usr/lib/ssl/openssl.cnf	
+...
+[ CA_default ]
+
+#dir            = ./demoCA              # Where everything is kept
+dir             = /etc/ssl/openldap
+certs           = $dir/certs            # Where the issued certs are kept
+crl_dir         = $dir/crl              # Where the issued crl are kept
+...
+echo "1001" > /etc/ssl/openldap/serial
+
+touch /etc/ssl/openldap/index.txt
+
+openssl genrsa -aes256 -out /etc/ssl/openldap/private/cakey.pem 2048
+openssl rsa -in /etc/ssl/openldap/private/cakey.pem -out /etc/ssl/openldap/private/cakey.pem
+openssl req -new -x509 -days 2000 -key /etc/ssl/openldap/private/cakey.pem -out /etc/ssl/openldap/certs/cacert.pem
+
+openssl genrsa -aes256 -out /etc/ssl/openldap/private/ldapserver-key.key 2048
+openssl rsa -in /etc/ssl/openldap/private/ldapserver-key.key -out /etc/ssl/openldap/private/ldapserver-key.key
+openssl req -new -key /etc/ssl/openldap/private/ldapserver-key.key -out /etc/ssl/openldap/certs/ldapserver-cert.csr
+
+openssl ca -keyfile /etc/ssl/openldap/private/cakey.pem -cert /etc/ssl/openldap/certs/cacert.pem -in /etc/ssl/openldap/certs/ldapserver-cert.csr -out /etc/ssl/openldap/certs/ldapserver-cert.crt
+openssl verify -CAfile /etc/ssl/openldap/certs/cacert.pem /etc/ssl/openldap/certs/ldapserver-cert.crt
+/etc/ssl/openldap/certs/ldapserver-cert.crt: OK
+
+
+/etc/ssl/openldap/certs/cacert.pem
+/etc/ssl/openldap/certs/ldapserver-cert.crt
+/etc/ssl/openldap/private/ldapserver-key.key
+
+chown -R openldap: /etc/ssl/openldap/
+
+nano ldap-tls.ldif
+....
+dn: cn=config
+changetype: modify
+add: olcTLSCACertificateFile
+olcTLSCACertificateFile: /etc/ssl/openldap/certs/cacert.pem
+-
+replace: olcTLSCertificateFile
+olcTLSCertificateFile: /etc/ssl/openldap/certs/ldapserver-cert.crt
+-
+replace: olcTLSCertificateKeyFile
+olcTLSCertificateKeyFile: /etc/ssl/openldap/private/ldapserver-key.key
+....
+
+ldapmodify -Y EXTERNAL -H ldapi:/// -f ldap-tls.ldif
+
+SASL/EXTERNAL authentication started
+SASL username: gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+SASL SSF: 0
+modifying entry "cn=config"
+
+slapcat -b "cn=config" | grep -E "olcTLS"
+
+slaptest -u
+
+nano /etc/ldap/ldap.conf
+
+sed -i 's|certs/ca-certificates.crt|openldap/certs/cacert.pem|' /etc/ldap/ldap.conf		[for Server Side Certificate]
+
+systemctl restart slapd
+
+ldapwhoami -H ldap://logon.bykea.local -x -ZZ
+ldapwhoami -H ldapi:/// -x -ZZ
+
+nano /etc/apparmor.d/usr.sbin.slapd
+  #TLS
+  /etc/ssl/openldap/certs/ r,
+  /etc/ssl/openldap/certs/* r,
+  /etc/ssl/openldap/private/ r,
+  /etc/ssl/openldap/private/* r,
+  
+apparmor_parser -r /etc/apparmor.d/usr.sbin.slapd
+
+slapcat -b "cn=config" | grep "olcTLS"
+
+
+export SUDO_FORCE_REMOVE=yes
+apt install sudo-ldap
+cp /usr/share/doc/sudo-ldap/schema.OpenLDAP /etc/ldap/schema/sudo.schema
+mkdir /tmp/ldap-sudo
+echo "include /etc/ldap/schema/sudo.schema" > /tmp/ldap-sudo/ldapsudo.conf
+cd /tmp/ldap-sudo
+slaptest -f ldapsudo.conf -F .
+ls cn\=config/cn\=schema/
+
+nano cn\=config/cn\=schema/'cn={0}sudo.ldif'
+....
+TO:
+dn: cn={0}sudo
+objectClass: olcSchemaConfig
+cn: {0}sudo
+THIS:
+dn: cn=sudo,cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: sudo
+
+REMOVE:
+structuralObjectClass: olcSchemaConfig
+entryUUID: a0db89da-2646-103a-83d7-df36427f181e
+creatorsName: cn=config
+createTimestamp: 20200509134211Z
+entryCSN: 20200509134211.249833Z#000000#000#000000
+modifiersName: cn=config
+modifyTimestamp: 20200509134211Z
+.....
+
+
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f 'cn=config/cn=schema/cn={0}sudo.ldif'
+
+ldapadd -Y EXTERNAL -H ldapi:/// -Q
+...
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+add: olcDbIndex
+olcDbIndex: sudoUser,sudoHost pres,eq
+...
+Copy Paste press ENER and then press CTRL+D
+
+
+slapcat -n 0 | grep olcDbIndex
+
+nano users-ou.ldif
+...
+dn: ou=people,dc=logon,dc=bykea,dc=local
+objectClass: organizationalUnit
+objectClass: top
+ou: people
+
+dn: ou=groups,dc=logon,dc=bykea,dc=local
+objectClass: organizationalUnit
+objectClass: top
+ou: groups
+...
+
+
+nano update-mdb-acl.ldif
+...
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcAccess
+olcAccess: to attrs=userPassword,shadowLastChange,shadowExpire
+  by self write
+  by anonymous auth
+  by dn.subtree="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage 
+  by dn.exact="cn=readonly,ou=people,dc=logon,dc=bykea,dc=local" read 
+  by * none
+olcAccess: to dn.exact="cn=readonly,ou=people,dc=logon,dc=bykea,dc=local" by dn.subtree="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none
+olcAccess: to dn.subtree="dc=logon,dc=bykea,dc=local" by dn.subtree="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage
+  by users read 
+  by * none
+... 
+ 
+ldapadd -Y EXTERNAL -H ldapi:/// -f update-mdb-acl.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f users-ou.ldif
+
+nano luser01.ldif
+...
+dn: uid=luser01,ou=people,dc=logon,dc=bykea,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: luser01
+cn: Linux01
+sn: Uuser
+loginShell: /bin/bash
+uidNumber: 5101
+gidNumber: 5001
+homeDirectory: /home/luser01
+shadowMax: 60
+shadowMin: 1
+shadowWarning: 7
+shadowInactive: 7
+shadowLastChange: 0
+
+dn: cn=luser01,ou=groups,dc=logon,dc=bykea,dc=local
+objectClass: posixGroup
+cn: luser01
+gidNumber: 5001
+memberUid: luser01
+...
+
+ldapadd -Y EXTERNAL -H ldapi:/// -f luser01.ldif
+ldappasswd -H ldapi:/// -Y EXTERNAL -S "uid=luser01,ou=people,dc=logon,dc=bykea,dc=local"
+
+ldapwhoami -h logon.bykea.local -x -D "uid=luser01,ou=people,dc=logon,dc=bykea,dc=local" -W     [User's passwd checker]
+
+slappasswd
+nano luser02.ldif
+...
+dn: uid=luser02,ou=people,dc=logon,dc=bykea,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: luser02
+cn: luser02
+givenName: Linux02
+sn: Uuser
+userPassword: {SSHA}XwZRuQ8WezL0PaWG1wY+QQ5MvCREUgH+
+loginShell: /bin/bash
+uidNumber: 5102
+gidNumber: 5001
+homeDirectory: /home/luser02
+shadowMax: 60
+shadowMin: 1
+shadowWarning: 7
+shadowInactive: 7
+shadowLastChange: 0
+
+dn: cn=luser02,ou=groups,dc=logon,dc=bykea,dc=local
+objectClass: posixGroup
+cn: luser02
+gidNumber: 5001
+memberUid: luser02
+...
+
+ldapadd -x -D cn=admin,dc=logon,dc=bykea,dc=local -W -f luser02.ldif
+
+ldapsearch -x -LLL -b "dc=logon,dc=bykea,dc=local"
+
+ldapsearch -x -LLL -b "dc=logon,dc=bykea,dc=local" '(objectclass=*)' uid givenName sn
+
+ldapsearch -x -LLL -b "dc=logon,dc=bykea,dc=local" '(objectclass=*)' uid givenName sn | grep -vE 'uid=|dn:'
+
+ldapwhoami -vvv -h localhost -D "uid=luser02,ou=people,dc=logon,dc=bykea,dc=local" -x -W
+
+
+slappasswd
+{SSHA}xnyjjdhan6mAgkiHRkUq+twsB341QWbS
+
+
+nano readonly-user.ldif
+...
+dn: cn=readonly,ou=people,dc=logon,dc=bykea,dc=local
+objectClass: organizationalRole
+objectClass: simpleSecurityObject
+cn: readonly
+userPassword: {SSHA}xnyjjdhan6mAgkiHRkUq+twsB341QWbS
+description: Bind DN user for LDAP Operations
+...
+
+ldapadd -Y EXTERNAL -H ldapi:/// -f readonly-user.ldif
+
+ldapsearch -Q -LLL -Y EXTERNAL -H ldapi:/// -b cn=config '(olcDatabase={1}mdb)' olcAccess
+
+ufw allow "OpenLDAP LDAP"
+ufw allow "OpenLDAP LDAPS"
+
+
+apt update
+
+apt install sssd libpam-sss libnss-sss
+
+nano /etc/sssd/sssd.conf
+...
+[sssd]
+services = nss, pam
+config_file_version = 2
+domains = default
+
+[nss]
+
+[pam]
+offline_credentials_expiration = 60
+
+[domain/default]
+ldap_id_use_start_tls = True
+cache_credentials = True
+ldap_search_base = dc=logon,dc=bykea,dc=local
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = ldap
+access_provider = ldap
+ldap_uri = ldap://logon.bykea.local
+ldap_default_bind_dn = cn=readonly,ou=people,dc=logon,dc=bykea,dc=local
+ldap_default_authtok = Bykea@321
+ldap_tls_reqcert = demand
+ldap_tls_cacert = /etc/ssl/certs/ldapcacert.crt
+ldap_tls_cacertdir = /etc/ssl/certs
+ldap_search_timeout = 50
+ldap_network_timeout = 60
+ldap_access_order = filter
+ldap_access_filter = (objectClass=posixAccount)
+...
+
+C L I E N T - S E T T I N G S
+
+apt install sssd libpam-sss libnss-sss vim sssd-tools libsss-sudo ldap-utils -y
+
+nano /etc/sssd/sssd.conf
+...
+[sssd]
+services = nss, pam, sudo
+config_file_version = 2
+domains = default
+
+[nss]
+
+[pam]
+offline_credentials_expiration = 60
+
+[domain/default]
+ldap_id_use_start_tls = True
+cache_credentials = True
+ldap_search_base = dc=logon,dc=bykea,dc=local
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = ldap
+access_provider = ldap
+ldap_uri = ldap://logon.bykea.local
+ldap_default_bind_dn = cn=readonly,ou=people,dc=logon,dc=bykea,dc=local
+ldap_default_authtok = Bkyea@321
+ldap_tls_reqcert = demand
+ldap_tls_cacert = /etc/ssl/certs/ldapcacert.crt
+ldap_tls_cacertdir = /etc/ssl/certs
+ldap_search_timeout = 50
+ldap_network_timeout = 60
+ldap_access_order = filter
+ldap_access_filter = (objectClass=posixAccount)
+...
+
+openssl s_client -connect logon.bykea.local:636 -showcerts < /dev/null | openssl x509 -text | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p'
+openssl s_client -connect logon.bykea.local:389 -starttls ldap -showcerts < /dev/null | openssl x509 -text | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p'
+COPY & PASTE the certificate
+
+nano /etc/ssl/certs/ldapcacert.crt 
+
+
+openssl s_client -connect logon.bykea.local:389 -CAfile /etc/ssl/certs/ldapcacert.crt
+
+nano /etc/ldap/ldap.conf
+
+TLS_CACERT      /etc/ssl/certs/ldapcacert.crt
+
+chmod 600 -R /etc/sssd
+
+systemctl restart sssd
+
+systemctl status sssd
+
+systemctl enable sssd
+
+nano /etc/pam.d/common-session
+
+session required        pam_mkhomedir.so skel=/etc/skel/ umask=0022
+
+# and here are more per-package modules (the "Additional" block)
+session required        pam_unix.so
+session optional                        pam_sss.so
+session required        pam_mkhomedir.so skel=/etc/skel/ umask=0022
+session optional        pam_systemd.so
+
+nano /etc/nsswitch.conf
+...
+passwd:         compat	sss
+group:          compat	sss
+shadow:         compat	sss
+gshadow:        files
+...
+nano /etc/pam.d/common-password
+password	[success=1 user_unknown=ignore default=die]	pam_ldap.so try_first_pass
+
+ldapwhoami -H ldap://logon.bykea.local -x -ZZ
+Anonymous
+
+ldapsearch -H ldapi:/// -Y EXTERNAL -b "ou=people,dc=logon,dc=bykea,dc=local" dn -LLL -Q
+RESULT:
+dn: ou=people,dc=logon,dc=bykea,dc=local
+
+dn: uid=janedoe,ou=people,dc=logon,dc=bykea,dc=local
+
+dn: uid=luser01,ou=people,dc=logon,dc=bykea,dc=local
+
+
+
+
+
